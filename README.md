@@ -151,9 +151,3 @@ MainActivity                 ← Main UI (Jetpack Compose)
 | [OkHttp](https://square.github.io/okhttp/) | HTTP & WebSocket |
 | Jetpack Compose | UI framework |
 | Kotlin Coroutines | Async concurrency |
-
----
-
-## License
-
-See [LICENSE](LICENSE) for details.
