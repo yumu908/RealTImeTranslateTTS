@@ -63,29 +63,45 @@ class TranslationRefiner(
         const val PROVIDER_OPENAI = 2
         const val PROVIDER_LOCAL = 3
         const val PROVIDER_ON_DEVICE = 4
+        const val PROVIDER_CLAUDE = 5
 
         data class ModelPreset(val id: String, val label: String, val desc: String)
 
         val GROQ_MODELS = listOf(
             ModelPreset("llama-3.3-70b-versatile", "Llama 3.3 70B", "极速 · 免费额度"),
             ModelPreset("llama-3.1-8b-instant", "Llama 3.1 8B", "最快 · 免费"),
+            ModelPreset("llama-3.1-70b-versatile", "Llama 3.1 70B", "高质量"),
             ModelPreset("gemma2-9b-it", "Gemma 2 9B", "Google · 免费"),
             ModelPreset("mixtral-8x7b-32768", "Mixtral 8x7B", "MoE · 均衡"),
+            ModelPreset("deepseek-r1-distill-llama-70b", "DeepSeek R1 70B", "深度推理"),
         )
 
         val OPENAI_MODELS = listOf(
+            ModelPreset("gpt-4.1-nano", "GPT-4.1 Nano", "最快 · 最低价"),
+            ModelPreset("gpt-4.1-mini", "GPT-4.1 Mini", "快速 · 均衡"),
+            ModelPreset("gpt-4.1", "GPT-4.1", "最新旗舰"),
             ModelPreset("gpt-4o-mini", "GPT-4o Mini", "快速 · 低价"),
             ModelPreset("gpt-4o", "GPT-4o", "高质量"),
-            ModelPreset("gpt-4.1-mini", "GPT-4.1 Mini", "最新 · 快速"),
-            ModelPreset("gpt-4.1-nano", "GPT-4.1 Nano", "最快 · 最低价"),
+            ModelPreset("o4-mini", "o4-mini", "推理模型 · 快速"),
+            ModelPreset("o3-mini", "o3-mini", "推理模型"),
+        )
+
+        val CLAUDE_MODELS = listOf(
+            ModelPreset("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "极速 · 推荐"),
+            ModelPreset("claude-sonnet-4-20250514", "Claude Sonnet 4", "均衡 · 高质量"),
+            ModelPreset("claude-opus-4-20250805", "Claude Opus 4", "最强推理"),
+            ModelPreset("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet", "上代旗舰"),
+            ModelPreset("claude-3-5-haiku-20241022", "Claude 3.5 Haiku", "上代极速"),
         )
 
         val LOCAL_MODELS = listOf(
             ModelPreset("qwen2.5:3b", "Qwen 2.5 3B", "极快 · 内存~2GB"),
             ModelPreset("qwen2.5:7b", "Qwen 2.5 7B", "均衡 · 内存~5GB"),
+            ModelPreset("qwen2.5:14b", "Qwen 2.5 14B", "高质量 · 内存~9GB"),
             ModelPreset("llama3.2:3b", "Llama 3.2 3B", "极快 · 内存~2GB"),
             ModelPreset("gemma2:2b", "Gemma 2 2B", "最快 · 内存~1.5GB"),
             ModelPreset("phi3:mini", "Phi-3 Mini", "微软 · 内存~2GB"),
+            ModelPreset("deepseek-r1:7b", "DeepSeek R1 7B", "推理 · 内存~5GB"),
         )
 
         val ON_DEVICE_MODELS = listOf(
@@ -99,6 +115,7 @@ class TranslationRefiner(
         fun providerBaseUrl(provider: Int): String = when (provider) {
             PROVIDER_GROQ -> "https://api.groq.com/openai/v1"
             PROVIDER_OPENAI -> "https://api.openai.com/v1"
+            PROVIDER_CLAUDE -> "https://api.anthropic.com/v1"
             PROVIDER_ON_DEVICE -> "http://localhost:11434/v1"
             else -> ""
         }
@@ -106,6 +123,7 @@ class TranslationRefiner(
         fun defaultModel(provider: Int): String = when (provider) {
             PROVIDER_GROQ -> GROQ_MODELS.first().id
             PROVIDER_OPENAI -> OPENAI_MODELS.first().id
+            PROVIDER_CLAUDE -> CLAUDE_MODELS.first().id
             PROVIDER_LOCAL -> LOCAL_MODELS.first().id
             PROVIDER_ON_DEVICE -> ON_DEVICE_MODELS.first().id
             else -> ""
@@ -117,6 +135,9 @@ class TranslationRefiner(
         lower.contains("localhost") || lower.contains("127.0.0.1") ||
                 lower.contains("192.168.") || lower.contains("10.0.")
     }
+
+    /** Whether this refiner targets the Anthropic Messages API (not OpenAI-compatible). */
+    private val isClaude: Boolean = baseUrl.contains("anthropic.com")
 
     // Paragraph-level context: list of past refined paragraphs for coherence
     private val paragraphContext = ArrayDeque<Pair<String, String>>() // EN paragraph → ZH paragraph
@@ -215,41 +236,77 @@ class TranslationRefiner(
 
     private suspend fun callLlm(systemPrompt: String, userMsg: String): String =
         withContext(Dispatchers.IO) {
-            // Scale max_tokens based on input length to avoid truncation on long paragraphs.
-            // Heuristic: Chinese output is ~1.5x the English word count and each Chinese
-            // character costs ~2 tokens (BPE), so tokens ≈ words × 1.5 × 2 = words × 3.
-            // Upper bound is 2000 because paragraph refinement may process many sentences.
             val inputWords = userMsg.split(Regex("""\s+""")).size
             val estimatedTokens = (inputWords * 3).coerceIn(200, 2000)
-            val json = JSONObject().apply {
-                put("model", model)
-                put("messages", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("role", "system")
-                        put("content", systemPrompt)
-                    })
-                    put(JSONObject().apply {
-                        put("role", "user")
-                        put("content", userMsg)
-                    })
-                })
-                put("temperature", 0.2)  // Lower temperature = more deterministic, accurate output
-                put("max_tokens", estimatedTokens)
-                put("stream", true)
+
+            if (isClaude) {
+                callClaudeLlm(systemPrompt, userMsg, estimatedTokens)
+            } else {
+                callOpenAiCompatibleLlm(systemPrompt, userMsg, estimatedTokens)
             }
-
-            val request = Request.Builder()
-                .url("${baseUrl.trimEnd('/')}/chat/completions")
-                .addHeader("Authorization", "Bearer $apiKey")
-                .post(json.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-
-            val response = (if (isLocal) localClient else cloudClient).newCall(request).execute()
-            if (!response.isSuccessful) {
-                val errBody = response.body?.string() ?: ""
-                throw Exception("HTTP ${response.code}: $errBody")
-            }
-
-            collectSseTokens(response.body?.charStream()?.buffered())
         }
+
+    private fun callOpenAiCompatibleLlm(systemPrompt: String, userMsg: String, maxTokens: Int): String {
+        val json = JSONObject().apply {
+            put("model", model)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "system")
+                    put("content", systemPrompt)
+                })
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", userMsg)
+                })
+            })
+            put("temperature", 0.2)
+            put("max_tokens", maxTokens)
+            put("stream", true)
+        }
+
+        val request = Request.Builder()
+            .url("${baseUrl.trimEnd('/')}/chat/completions")
+            .addHeader("Authorization", "Bearer $apiKey")
+            .post(json.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        val response = (if (isLocal) localClient else cloudClient).newCall(request).execute()
+        if (!response.isSuccessful) {
+            val errBody = response.body?.string() ?: ""
+            throw Exception("HTTP ${response.code}: $errBody")
+        }
+
+        return collectSseTokens(response.body?.charStream()?.buffered())
+    }
+
+    private fun callClaudeLlm(systemPrompt: String, userMsg: String, maxTokens: Int): String {
+        val json = JSONObject().apply {
+            put("model", model)
+            put("max_tokens", maxTokens)
+            put("system", systemPrompt)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", userMsg)
+                })
+            })
+            put("temperature", 0.2)
+            put("stream", true)
+        }
+
+        val request = Request.Builder()
+            .url("${baseUrl.trimEnd('/')}/messages")
+            .addHeader("x-api-key", apiKey)
+            .addHeader("anthropic-version", "2023-06-01")
+            .post(json.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        val response = cloudClient.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val errBody = response.body?.string() ?: ""
+            throw Exception("HTTP ${response.code}: $errBody")
+        }
+
+        return collectClaudeSseTokens(response.body?.charStream()?.buffered())
+    }
 }

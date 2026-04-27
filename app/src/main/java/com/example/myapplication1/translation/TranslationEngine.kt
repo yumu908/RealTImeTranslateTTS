@@ -263,6 +263,78 @@ internal fun buildContextPrompt(base: String, context: TranslationContext): Stri
     }
 }
 
+/**
+ * Claude API translation via Anthropic Messages endpoint (streaming).
+ *
+ * Key differences from OpenAI-compatible:
+ * - Endpoint: /v1/messages (not /chat/completions)
+ * - Auth: x-api-key header (not Bearer token)
+ * - Body: system is top-level string, not a system message
+ * - SSE: content_block_delta events with delta.text (not choices[0].delta.content)
+ */
+class ClaudeTranslation(
+    private val apiKey: String,
+    private val model: String = "claude-sonnet-4-20250514"
+) : TranslationEngine() {
+    override val isLlmBased: Boolean = true
+
+    companion object {
+        private const val TAG = "ClaudeTranslation"
+        private const val BASE_URL = "https://api.anthropic.com/v1/messages"
+        private const val ANTHROPIC_VERSION = "2023-06-01"
+
+        private val sharedClient = OkHttpClient.Builder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
+
+        data class ModelPreset(val id: String, val label: String, val desc: String)
+
+        val MODELS = listOf(
+            ModelPreset("claude-sonnet-4-20250514", "Claude Sonnet 4", "均衡 · 推荐"),
+            ModelPreset("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "极速 · 最低价"),
+            ModelPreset("claude-opus-4-20250805", "Claude Opus 4", "最强推理 · 最贵"),
+            ModelPreset("claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet", "上代旗舰"),
+            ModelPreset("claude-3-5-haiku-20241022", "Claude 3.5 Haiku", "上代极速"),
+        )
+    }
+
+    override suspend fun translate(text: String): String = translate(text, TranslationContext())
+
+    override suspend fun translate(text: String, context: TranslationContext): String = withContext(Dispatchers.IO) {
+        val systemPrompt = buildContextPrompt(buildSiSystemPrompt(context.sourceLang, context.targetLang), context)
+        val words = text.trim().split(Regex("""\s+""")).size
+        val maxTokens = (words * 3).coerceIn(80, 600)
+
+        val json = JSONObject().apply {
+            put("model", model)
+            put("max_tokens", maxTokens)
+            put("system", systemPrompt)
+            put("messages", JSONArray().apply {
+                put(JSONObject().apply { put("role", "user"); put("content", text) })
+            })
+            put("temperature", 0.2)
+            put("stream", true)
+        }
+
+        val request = Request.Builder()
+            .url(BASE_URL)
+            .addHeader("x-api-key", apiKey)
+            .addHeader("anthropic-version", ANTHROPIC_VERSION)
+            .addHeader("content-type", "application/json")
+            .post(json.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+
+        val response = sharedClient.newCall(request).execute()
+        if (!response.isSuccessful) {
+            val errBody = response.body?.string() ?: ""
+            throw Exception("HTTP ${response.code}: $errBody")
+        }
+
+        collectClaudeSseTokens(response.body?.charStream()?.buffered())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SSE streaming helper — shared by LLMTranslation and LocalServerTranslation
 // ---------------------------------------------------------------------------
@@ -293,6 +365,36 @@ internal fun collectSseTokens(reader: BufferedReader?): String {
         }
     } catch (e: Exception) {
         Log.w("SSE", "Stream read error: ${e.message}")
+    }
+    return sb.toString().trim()
+}
+
+/**
+ * Collects text tokens from a Claude Messages SSE stream.
+ * Claude uses `event: content_block_delta` lines followed by `data: {...}` lines
+ * where the text lives at `delta.text`.
+ */
+internal fun collectClaudeSseTokens(reader: BufferedReader?): String {
+    if (reader == null) return ""
+    val sb = StringBuilder()
+    try {
+        reader.use { br ->
+            br.lineSequence().forEach { line ->
+                if (!line.startsWith("data:")) return@forEach
+                val payload = line.removePrefix("data:").trim()
+                if (payload.isEmpty()) return@forEach
+                try {
+                    val obj = JSONObject(payload)
+                    val type = obj.optString("type")
+                    if (type == "content_block_delta") {
+                        val text = obj.optJSONObject("delta")?.optString("text", "") ?: ""
+                        if (text.isNotEmpty()) sb.append(text)
+                    }
+                } catch (_: Exception) { /* skip malformed lines */ }
+            }
+        }
+    } catch (e: Exception) {
+        Log.w("ClaudeSSE", "Stream read error: ${e.message}")
     }
     return sb.toString().trim()
 }

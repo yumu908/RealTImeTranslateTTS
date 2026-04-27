@@ -149,6 +149,16 @@ class MainActivity : ComponentActivity() {
     private var _groqKey by mutableStateOf("")
     private var _whisperModelIdx by mutableStateOf(0)
 
+    // Claude API (Anthropic)
+    private var _claudeKey by mutableStateOf("")
+    private var _claudeTransModel by mutableStateOf("claude-sonnet-4-20250514")
+
+    // 火山引擎 TTS（字节跳动）
+    private var _volcanoAppId by mutableStateOf("")
+    private var _volcanoToken by mutableStateOf("")
+    private var _volcanoCluster by mutableStateOf(com.example.myapplication1.tts.VolcanoTts.DEFAULT_CLUSTER)
+    private var _volcanoVoiceIdx by mutableStateOf(0)
+
     // 翻译引擎: 0=MLKit, 1=OpenAI, 2=Groq, 3=DeepL, 4=本地服务器, 5=Opus-MT, 6=NLLB
     private var _translationEngineType by mutableStateOf(0)
     private var _deeplKey by mutableStateOf("")
@@ -352,6 +362,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var edgeTts: EdgeTts
     private val googleTts = GoogleTranslateTts()
     private var openAiTts: OpenAiTts? = null
+    private var volcanoTts: com.example.myapplication1.tts.VolcanoTts? = null
+    private var volcanoTtsCreds: String = ""  // cached "appId|token|cluster" for invalidation
     private val ttsQueue = Channel<String>(Channel.UNLIMITED)
     private var ttsConsumerJob: Job? = null
 
@@ -526,6 +538,7 @@ class MainActivity : ComponentActivity() {
         try { systemTts?.stop(); systemTts?.shutdown() } catch (_: Throwable) {}
         sherpaWhisperAsr.release(); edgeTts.close(); googleTts.close()
         try { openAiTts?.close() } catch (_: Throwable) {}
+        try { volcanoTts?.close() } catch (_: Throwable) {}
         if (::streamingAsr.isInitialized) streamingAsr.release()
         if (::kokoroTts.isInitialized) kokoroTts.release()
         if (::vitsTts.isInitialized) vitsTts.release()
@@ -784,7 +797,7 @@ class MainActivity : ComponentActivity() {
         _isTtsSpeaking = true
         _lastTtsLength = text.length
         try {
-            when (_ttsEngine) { 0 -> speakEdge(text); 1 -> speakSystem(text); 2 -> speakGoogle(text); 3 -> speakOpenAi(text); 4 -> speakKokoro(text); else -> speakEdge(text) }
+            when (_ttsEngine) { 0 -> speakEdge(text); 1 -> speakSystem(text); 2 -> speakGoogle(text); 3 -> speakOpenAi(text); 4 -> speakKokoro(text); 5 -> speakVolcano(text); else -> speakEdge(text) }
         } finally {
             _isTtsSpeaking = false
             _ttsSpeakEndTime = System.currentTimeMillis()
@@ -825,6 +838,26 @@ class MainActivity : ComponentActivity() {
             val voice = OpenAiTts.VOICES.getOrNull(_openaiVoiceIdx)?.first ?: "nova"
             openAiTts?.speak(text, voice = voice, speed = dynamicOpenAiSpeed())
         } catch (e: Throwable) { log("OpenAI TTS: ${e.message}"); speakEdge(text) }
+    }
+
+    private suspend fun speakVolcano(text: String) {
+        if (_volcanoAppId.isBlank() || _volcanoToken.isBlank()) {
+            log("火山引擎 TTS 未配置 App ID / Token，回退至 Edge")
+            speakEdge(text); return
+        }
+        try {
+            val creds = "$_volcanoAppId|$_volcanoToken|$_volcanoCluster"
+            if (volcanoTts == null || volcanoTtsCreds != creds) {
+                volcanoTts?.close()
+                volcanoTts = com.example.myapplication1.tts.VolcanoTts(
+                    _volcanoAppId, _volcanoToken, _volcanoCluster, cacheDir
+                )
+                volcanoTtsCreds = creds
+            }
+            val voices = com.example.myapplication1.tts.VolcanoTts.voicesForLang(_targetLang)
+            val voice = voices.getOrNull(_volcanoVoiceIdx)?.first ?: voices.first().first
+            volcanoTts?.speak(text, voice = voice, speed = dynamicOpenAiSpeed())
+        } catch (e: Throwable) { log("火山引擎 TTS: ${e.message}"); speakEdge(text) }
     }
 
     private fun speakManual(text: String) {
@@ -1273,7 +1306,14 @@ class MainActivity : ComponentActivity() {
         _selectedOutputId = p.getInt("selected_output_id", 0)
         _translationEngineType = p.getInt("translation_engine", 0)
         _deeplKey = p.getString("deepl_key", "") ?: ""
+        _claudeKey = p.getString("claude_key", "") ?: ""
+        _claudeTransModel = p.getString("claude_trans_model", "claude-sonnet-4-20250514") ?: "claude-sonnet-4-20250514"
         _openaiVoiceIdx = p.getInt("openai_voice_idx", 4)
+        _volcanoAppId = p.getString("volcano_app_id", "") ?: ""
+        _volcanoToken = p.getString("volcano_access_token", "") ?: ""
+        _volcanoCluster = p.getString("volcano_cluster", com.example.myapplication1.tts.VolcanoTts.DEFAULT_CLUSTER)
+            ?: com.example.myapplication1.tts.VolcanoTts.DEFAULT_CLUSTER
+        _volcanoVoiceIdx = p.getInt("volcano_voice_idx", 0)
         _localServerUrl = p.getString("local_server_url", "http://192.168.1.100:11434/v1") ?: "http://192.168.1.100:11434/v1"
         _localServerModel = p.getString("local_server_model", "qwen2.5:7b") ?: "qwen2.5:7b"
         _smartFilterEnabled = p.getBoolean("smart_filter_enabled", true)
@@ -1473,6 +1513,7 @@ class MainActivity : ComponentActivity() {
                 if (OnDeviceTranslationModel.NLLB_600M_INT8.isDownloaded(this)) engine.init()
                 engine
             }
+            7 -> ClaudeTranslation(_claudeKey, _claudeTransModel)
             else -> MlKitTranslation(translator)
         }
         cachedTransEngineType = _translationEngineType
@@ -1516,7 +1557,9 @@ class MainActivity : ComponentActivity() {
     private fun buildQualityEngine(): TranslationEngine? {
         if (_latencyMode == 0) return null  // REALTIME — no quality path needed
         val primary = _translationEngineType
-        // Prefer OpenAI (high quality), then DeepL, then Groq (fast), then local server
+        // Prefer Claude (best), then OpenAI (high quality), then DeepL, then Groq (fast), then local
+        if (primary != 7 && _claudeKey.isNotBlank())
+            return ClaudeTranslation(_claudeKey, _claudeTransModel)
         if (primary != 1 && _openaiKey.isNotBlank())
             return LLMTranslation(_openaiKey)
         if (primary != 3 && _deeplKey.isNotBlank())
@@ -1542,6 +1585,9 @@ class MainActivity : ComponentActivity() {
             TranslationRefiner.PROVIDER_LOCAL -> {
                 if (_refineServerUrl.isNotBlank()) TranslationRefiner("", _refineServerUrl, _refineModel) else null
             }
+            TranslationRefiner.PROVIDER_CLAUDE -> {
+                if (_claudeKey.isNotBlank()) TranslationRefiner(_claudeKey, TranslationRefiner.providerBaseUrl(TranslationRefiner.PROVIDER_CLAUDE), _refineModel) else null
+            }
             else -> null
         }
     }
@@ -1555,6 +1601,7 @@ class MainActivity : ComponentActivity() {
         4 -> _localServerUrl.isNotBlank()
         5 -> OnDeviceTranslationModel.OPUS_MT_EN_ZH.isDownloaded(this)
         6 -> OnDeviceTranslationModel.NLLB_600M_INT8.isDownloaded(this)
+        7 -> _claudeKey.isNotBlank()
         else -> _translatorReady
     }
 
@@ -1785,7 +1832,7 @@ class MainActivity : ComponentActivity() {
                                 .indexOfFirst { it.id == curId }
                                 .let { if (it >= 0) it + 1 else 0 }
                             Column {
-                                Text(if (_uiLang == "en") "Real-time Translation" else "实时语音翻译", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                                Text(S("app_title"), fontWeight = FontWeight.Bold, fontSize = 18.sp)
                                 Text(
                                     if (currentSessionNum > 0) "#$currentSessionNum · ${asrLabel()}" else asrLabel(),
                                     fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
@@ -1812,8 +1859,8 @@ class MainActivity : ComponentActivity() {
                 if (_showSessionDialog) {
                     AlertDialog(
                         onDismissRequest = { _showSessionDialog = false; translationHistory.newSession() },
-                        title = { Text("会话选择") },
-                        text = { Text("继续上次会话还是新建？") },
+                        title = { Text(S("session_select")) },
+                        text = { Text(S("session_select_msg")) },
                         confirmButton = {
                             TextButton({
                                 _showSessionDialog = false
@@ -2159,8 +2206,8 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun LanguageDetectionSection() {
-        CollapsibleSection("语种检测与翻译方向", Icons.Default.Translate) {
-            SettingSwitch("自动检测语种", _langAutoMode) {
+        CollapsibleSection(S("lang_detection"), Icons.Default.Translate) {
+            SettingSwitch(S("auto_detect_lang"), _langAutoMode) {
                 _langAutoMode = it; saveBool("lang_auto_mode", it)
                 streamingAsr.languageDetectionEnabled = it && _lidReady
             }
@@ -2257,6 +2304,7 @@ class MainActivity : ComponentActivity() {
                 TransOption(1, S("openai_gpt"), S("high_quality"))
                 TransOption(2, S("groq_llm"), S("groq_desc"))
                 TransOption(3, S("deepl"), S("deepl_desc"))
+                TransOption(7, S("claude_api"), S("claude_desc"))
                 TransOption(4, S("local_server"), S("local_server_desc"))
                 TransOption(5, S("opus_mt"), S("opus_mt_desc"))
                 TransOption(6, S("nllb"), S("nllb_desc"))
@@ -2288,25 +2336,42 @@ class MainActivity : ComponentActivity() {
                 AnimatedVisibility(_translationEngineType == 3) {
                     ApiKeyInput("DeepL API Key", _deeplKey) { _deeplKey = it; saveKey("deepl_key", it); invalidateTranslationCache() }
                 }
+                AnimatedVisibility(_translationEngineType == 7) {
+                    Column(Modifier.padding(start = 4.dp, top = 6.dp)) {
+                        ApiKeyInput("Claude API Key", _claudeKey) { _claudeKey = it; saveKey("claude_key", it); invalidateTranslationCache() }
+                        Spacer(Modifier.height(6.dp))
+                        Text(S("trans_model"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        ClaudeTranslation.MODELS.forEach { preset ->
+                            SmallRadio("${preset.label}  ${preset.desc}", _claudeTransModel == preset.id) {
+                                _claudeTransModel = preset.id; saveKey("claude_trans_model", preset.id); invalidateTranslationCache()
+                            }
+                        }
+                        if (_claudeKey.isBlank()) {
+                            Text(S("need_claude_key_xapi"), fontSize = 11.sp, color = Color(0xFFEF5350),
+                                modifier = Modifier.padding(start = 8.dp, top = 4.dp))
+                        }
+                    }
+                }
                 if (_translationEngineType == 1 && _openaiKey.isBlank()) {
                     Text(S("need_openai_key"), fontSize = 11.sp, color = Color(0xFFEF5350),
                         modifier = Modifier.padding(start = 8.dp, top = 4.dp))
                 }
                 if (_translationEngineType == 2 && _groqKey.isBlank()) {
-                    Text("请在语音识别中设置 Groq API Key", fontSize = 11.sp, color = Color(0xFFEF5350),
+                    Text(S("need_groq_key"), fontSize = 11.sp, color = Color(0xFFEF5350),
                         modifier = Modifier.padding(start = 8.dp, top = 4.dp))
                 }
 
             }
 
             // 3.3) 翻译增强（延迟模式、背景信息、领域词库）
-            if (category == SettingsScreen.Translation) CollapsibleSection("翻译增强", Icons.Default.Tune) {
-                Text("提升翻译准确率与术语一致性", fontSize = 10.sp,
+            if (category == SettingsScreen.Translation) CollapsibleSection(S("trans_enhance"), Icons.Default.Tune) {
+                Text(S("trans_enhance_desc"), fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                     modifier = Modifier.padding(bottom = 6.dp))
 
                 // Latency mode selector
-                Text("翻译模式", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text(S("trans_mode"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(S("realtime") to 0, S("balanced") to 1, S("quality") to 2).forEach { (label, mode) ->
@@ -2329,7 +2394,7 @@ class MainActivity : ComponentActivity() {
                 Spacer(Modifier.height(10.dp))
 
                 // Domain selector
-                Text("领域词库", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text(S("domain_glossary"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                 @OptIn(ExperimentalLayoutApi::class)
                 FlowRow(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -2348,16 +2413,16 @@ class MainActivity : ComponentActivity() {
                 Spacer(Modifier.height(10.dp))
 
                 // Background input
-                Text("背景信息（可选）", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text(S("background_context"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                Text("帮助理解上下文，不会直接输出", fontSize = 10.sp,
+                Text(S("background_hint"), fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
                 OutlinedTextField(
                     _backgroundText,
                     onValueChange = { if (it.length <= 300) { _backgroundText = it; saveKey("background_text", it); updatePipelineContext() } },
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                     textStyle = LocalTextStyle.current.copy(fontSize = 12.sp),
-                    placeholder = { Text("如：这是一场医学研讨会", fontSize = 12.sp) },
+                    placeholder = { Text(S("background_placeholder"), fontSize = 12.sp) },
                     minLines = 2, maxLines = 4,
                     supportingText = { Text("${_backgroundText.length}/300", fontSize = 10.sp) }
                 )
@@ -2371,13 +2436,13 @@ class MainActivity : ComponentActivity() {
 
             // 3.4) 术语库管理
             @Suppress("DEPRECATION")
-            if (category == SettingsScreen.Translation) CollapsibleSection("术语库管理", Icons.Default.LibraryBooks) {
-                Text("管理内置、下载和自定义术语库", fontSize = 10.sp,
+            if (category == SettingsScreen.Translation) CollapsibleSection(S("glossary_mgmt"), Icons.Default.LibraryBooks) {
+                Text(S("glossary_mgmt_desc"), fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                     modifier = Modifier.padding(bottom = 6.dp))
 
                 // Built-in glossaries
-                Text("内置词库", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text(S("builtin_glossary"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                 GlossaryManager.availableDomains.forEach { (domain, label) ->
                     val count = GlossaryManager.getTerms(domain).size
@@ -2388,7 +2453,7 @@ class MainActivity : ComponentActivity() {
                 Spacer(Modifier.height(10.dp))
 
                 // Downloadable sources
-                Text("可下载词库", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text(S("downloadable_glossary"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                 GlossaryManager.registrySources.forEach { source ->
                     val downloaded = GlossaryManager.isSourceDownloaded(source.sourceId)
@@ -2399,7 +2464,7 @@ class MainActivity : ComponentActivity() {
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
                         }
                         if (downloaded) {
-                            Text("已下载", fontSize = 10.sp, color = Color(0xFF4CAF50))
+                            Text(S("downloaded_label"), fontSize = 10.sp, color = Color(0xFF4CAF50))
                         } else {
                             TextButton(
                                 onClick = {
@@ -2411,7 +2476,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 enabled = !_glossaryDownloading
-                            ) { Text(if (_glossaryDownloading) "下载中…" else "下载", fontSize = 11.sp) }
+                            ) { Text(if (_glossaryDownloading) S("downloading") else S("download"), fontSize = 11.sp) }
                         }
                     }
                 }
@@ -2419,9 +2484,9 @@ class MainActivity : ComponentActivity() {
                 Spacer(Modifier.height(10.dp))
 
                 // User upload
-                Text("自定义术语", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text(S("custom_glossary"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                Text("上传 CSV/TSV 文件（两列：英文,中文）", fontSize = 10.sp,
+                Text(S("import_csv_hint"), fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
 
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically,
@@ -2442,7 +2507,7 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     Button(onClick = { glossaryFilePicker.launch("text/*") }) {
-                        Text("选择文件", fontSize = 11.sp)
+                        Text(S("select_file"), fontSize = 11.sp)
                     }
                 }
 
@@ -2450,7 +2515,7 @@ class MainActivity : ComponentActivity() {
                 val imported = GlossaryManager.importedGlossaries
                 if (imported.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
-                    Text("已导入", fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    Text(S("imported"), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                     imported.forEach { ug ->
                         Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -2478,30 +2543,46 @@ class MainActivity : ComponentActivity() {
 
             // 3.5) AI 润色
             if (category == SettingsScreen.Translation) CollapsibleSection(S("ai_refine"), Icons.Default.AutoAwesome) {
-                Text("翻译后用 LLM 结合上下文修正整段话，再送入 TTS 播报", fontSize = 10.sp,
+                Text(S("refine_desc"), fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
                     modifier = Modifier.padding(bottom = 6.dp))
 
-                RefineProviderOption(TranslationRefiner.PROVIDER_OFF, S("close"), "不进行润色")
-                RefineProviderOption(TranslationRefiner.PROVIDER_GROQ, "Groq API", "极速 · 免费额度 · 推荐")
-                RefineProviderOption(TranslationRefiner.PROVIDER_OPENAI, "OpenAI API", "高质量")
-                RefineProviderOption(TranslationRefiner.PROVIDER_ON_DEVICE, "手机本机", "Termux + Ollama · 完全离线")
-                RefineProviderOption(TranslationRefiner.PROVIDER_LOCAL, "局域网服务器", "PC/Mac 上的 Ollama / LM Studio")
+                RefineProviderOption(TranslationRefiner.PROVIDER_OFF, S("refine_off"), S("refine_no_refine"))
+                RefineProviderOption(TranslationRefiner.PROVIDER_GROQ, "Groq API", S("refine_groq"))
+                RefineProviderOption(TranslationRefiner.PROVIDER_OPENAI, "OpenAI API", S("refine_openai"))
+                RefineProviderOption(TranslationRefiner.PROVIDER_CLAUDE, "Claude API", S("refine_claude"))
+                RefineProviderOption(TranslationRefiner.PROVIDER_ON_DEVICE, S("refine_on_device"), S("refine_on_device_desc"))
+                RefineProviderOption(TranslationRefiner.PROVIDER_LOCAL, S("refine_local"), S("refine_local_desc"))
 
                 // Key warnings
                 if (_refineProvider == TranslationRefiner.PROVIDER_GROQ && _groqKey.isBlank()) {
-                    Text("请在语音识别中设置 Groq API Key", fontSize = 11.sp, color = Color(0xFFEF5350),
+                    Text(S("need_groq_key"), fontSize = 11.sp, color = Color(0xFFEF5350),
                         modifier = Modifier.padding(start = 8.dp, top = 4.dp))
                 }
                 if (_refineProvider == TranslationRefiner.PROVIDER_OPENAI && _openaiKey.isBlank()) {
                     Text(S("need_openai_key"), fontSize = 11.sp, color = Color(0xFFEF5350),
                         modifier = Modifier.padding(start = 8.dp, top = 4.dp))
                 }
+                if (_refineProvider == TranslationRefiner.PROVIDER_CLAUDE && _claudeKey.isBlank()) {
+                    Text(S("need_claude_key"), fontSize = 11.sp, color = Color(0xFFEF5350),
+                        modifier = Modifier.padding(start = 8.dp, top = 4.dp))
+                }
 
                 // Model selection per provider
+                AnimatedVisibility(_refineProvider == TranslationRefiner.PROVIDER_CLAUDE) {
+                    Column(Modifier.padding(start = 8.dp, top = 6.dp)) {
+                        Text(S("model_select"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        TranslationRefiner.CLAUDE_MODELS.forEach { preset ->
+                            SmallRadio("${preset.label}  ${preset.desc}", _refineModel == preset.id) {
+                                _refineModel = preset.id; saveKey("refine_model", preset.id); invalidateTranslationCache()
+                            }
+                        }
+                    }
+                }
                 AnimatedVisibility(_refineProvider == TranslationRefiner.PROVIDER_GROQ) {
                     Column(Modifier.padding(start = 8.dp, top = 6.dp)) {
-                        Text("模型选择", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                        Text(S("model_select"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                         TranslationRefiner.GROQ_MODELS.forEach { preset ->
                             SmallRadio("${preset.label}  ${preset.desc}", _refineModel == preset.id) {
@@ -2512,7 +2593,7 @@ class MainActivity : ComponentActivity() {
                 }
                 AnimatedVisibility(_refineProvider == TranslationRefiner.PROVIDER_OPENAI) {
                     Column(Modifier.padding(start = 8.dp, top = 6.dp)) {
-                        Text("模型选择", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                        Text(S("model_select"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                         TranslationRefiner.OPENAI_MODELS.forEach { preset ->
                             SmallRadio("${preset.label}  ${preset.desc}", _refineModel == preset.id) {
@@ -2523,7 +2604,7 @@ class MainActivity : ComponentActivity() {
                 }
                 AnimatedVisibility(_refineProvider == TranslationRefiner.PROVIDER_ON_DEVICE) {
                     Column(Modifier.padding(start = 8.dp, top = 6.dp)) {
-                        Text("手机端推荐模型", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                        Text(S("phone_models"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                         TranslationRefiner.ON_DEVICE_MODELS.forEach { preset ->
                             SmallRadio("${preset.label}  ${preset.desc}", _refineModel == preset.id) {
@@ -2537,15 +2618,15 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(Modifier.padding(10.dp)) {
-                                Text("部署步骤", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                Text(S("deploy_steps"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                                 Text("1. Install Termux (F-Droid)", fontSize = 11.sp)
                                 Text("2. pkg install ollama", fontSize = 11.sp, fontStyle = FontStyle.Italic)
                                 Text("3. ollama serve &", fontSize = 11.sp, fontStyle = FontStyle.Italic)
                                 Text("4. ollama pull ${_refineModel}", fontSize = 11.sp, fontStyle = FontStyle.Italic)
-                                Text("模型会自动从 localhost:11434 连接", fontSize = 10.sp,
+                                Text(S("model_auto_connect"), fontSize = 10.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
                                     modifier = Modifier.padding(top = 4.dp))
-                                Text("Qwen2.5 0.5B/1.5B 中文能力最佳，推荐 8GB+ 内存手机", fontSize = 10.sp,
+                                Text(S("qwen_recommend"), fontSize = 10.sp,
                                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                             }
                         }
@@ -2558,7 +2639,7 @@ class MainActivity : ComponentActivity() {
                 }
                 AnimatedVisibility(_refineProvider == TranslationRefiner.PROVIDER_LOCAL) {
                     Column(Modifier.padding(start = 8.dp, top = 6.dp)) {
-                        Text("常用模型", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                        Text(S("common_models"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
                         TranslationRefiner.LOCAL_MODELS.forEach { preset ->
                             SmallRadio("${preset.label}  ${preset.desc}", _refineModel == preset.id) {
@@ -2586,10 +2667,11 @@ class MainActivity : ComponentActivity() {
             // 4) 语音合成
             if (category == SettingsScreen.Voice) CollapsibleSection(S("tts_engine"), Icons.AutoMirrored.Filled.VolumeUp) {
                 TtsOption(0, S("edge_neural"), S("ms_near_human"))
-                TtsOption(1, "系统 TTS", "Google 系统语音")
+                TtsOption(1, S("system_tts"), S("system_tts_desc"))
                 TtsOption(2, S("google_tts"), S("basic_quality"))
                 TtsOption(3, "OpenAI TTS", S("high_quality"))
                 TtsOption(4, S("sherpa_offline_tts"), S("zh_offline_tts"))
+                TtsOption(5, S("volcano_tts"), S("volcano_tts_desc"))
                 AnimatedVisibility(_ttsEngine == 3) {
                     Column(Modifier.padding(start = 12.dp, top = 6.dp)) {
                         Text("语音角色", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
@@ -2613,6 +2695,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 AnimatedVisibility(_ttsEngine == 4) { KokoroTtsPanel() }
+                AnimatedVisibility(_ttsEngine == 5) { VolcanoTtsPanel() }
             }
 
             // 5) 音频设备
@@ -2650,15 +2733,15 @@ class MainActivity : ComponentActivity() {
                         Spacer(Modifier.width(6.dp))
                         Column {
                             Text(mediaLabel, fontSize = 12.sp, fontWeight = if (_mediaCaptureActive) FontWeight.SemiBold else FontWeight.Normal)
-                            Text("捕获后台播放的媒体音频 · Android 10+", fontSize = 10.sp,
+                            Text(S("media_audio_hint"), fontSize = 10.sp,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f))
                         }
                     }
                 }
                 Spacer(Modifier.height(10.dp))
-                Text("输出设备（扬声器）", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                Text(S("output_device"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                SmallRadio("默认", _selectedOutputId == 0) { _selectedOutputId = 0; saveInt("selected_output_id", 0) }
+                SmallRadio(S("default_device"), _selectedOutputId == 0) { _selectedOutputId = 0; saveInt("selected_output_id", 0) }
                 _outputDevices.forEach { d ->
                     SmallRadio(deviceLabel(d), _selectedOutputId == d.id) { _selectedOutputId = d.id; saveInt("selected_output_id", d.id) }
                 }
@@ -2666,7 +2749,7 @@ class MainActivity : ComponentActivity() {
                 TextButton(onClick = { refreshAudioDevices(); log("设备列表已刷新") }) {
                     Icon(Icons.Default.Refresh, null, Modifier.size(14.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("刷新设备列表", fontSize = 12.sp)
+                    Text(S("refresh_devices"), fontSize = 12.sp)
                 }
             }
 
@@ -2718,15 +2801,15 @@ class MainActivity : ComponentActivity() {
             // 7) 媒体转译
             if (category == SettingsScreen.Advanced) CollapsibleSection(S("media_capture"), Icons.Default.Audiotrack) {
                 Text(
-                    "捕获后台播放的媒体或通话音频进行实时翻译（需 Android 10+）",
+                    S("capture_desc"),
                     fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
                 Spacer(Modifier.height(8.dp))
                 if (Build.VERSION.SDK_INT < 29) {
-                    Text("当前系统版本不支持媒体捕获", fontSize = 12.sp, color = Color(0xFFEF5350))
+                    Text(S("sys_ver_unsupported"), fontSize = 12.sp, color = Color(0xFFEF5350))
                 } else if (_mediaCaptureActive) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("正在捕获中", fontSize = 13.sp, color = Color(0xFF4CAF50))
+                        Text(S("capturing_active"), fontSize = 13.sp, color = Color(0xFF4CAF50))
                         Spacer(Modifier.weight(1f))
                         TextButton({ stopMediaCapture() }) { Text(S("stop_capture")) }
                     }
@@ -2741,17 +2824,17 @@ class MainActivity : ComponentActivity() {
             }
 
             // 7.5) GPU / NPU 加速
-            if (category == SettingsScreen.Advanced) CollapsibleSection("GPU / NPU 加速", Icons.Default.Memory) {
+            if (category == SettingsScreen.Advanced) CollapsibleSection(S("gpu_accel"), Icons.Default.Memory) {
                 Text(
-                    "选择 ONNX 推理后端。NNAPI 在多数中高端机型上可用（通过 GPU / DSP / NPU 加速 Sherpa ASR、TTS、降噪、语种检测与离线翻译）；XNNPACK 为 Google 优化的高效 CPU 内核，兼容性最好。",
+                    S("gpu_desc"),
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
                 )
                 Spacer(Modifier.height(8.dp))
                 val providers = listOf(
-                    Triple(AccelerationConfig.CPU, "CPU（默认）", "标准 CPU 路径，兼容所有设备"),
-                    Triple(AccelerationConfig.NNAPI, "NNAPI（GPU / NPU）", "系统神经网络 API · 推荐 · 需 Android 8.1+"),
-                    Triple(AccelerationConfig.XNNPACK, "XNNPACK（CPU 加速）", "Google 优化 CPU 后端 · 性能/兼容折中"),
+                    Triple(AccelerationConfig.CPU, S("gpu_cpu"), S("gpu_cpu_desc")),
+                    Triple(AccelerationConfig.NNAPI, S("gpu_nnapi"), S("gpu_nnapi_desc")),
+                    Triple(AccelerationConfig.XNNPACK, S("gpu_xnnpack"), S("gpu_xnnpack_desc")),
                 )
                 providers.forEach { (value, label, desc) ->
                     Row(
@@ -2781,14 +2864,14 @@ class MainActivity : ComponentActivity() {
                 }
                 if (_recording) {
                     Text(
-                        "⚠ 录音中无法切换，请先停止录音",
+                        S("recording_no_switch"),
                         fontSize = 10.sp,
                         color = Color(0xFFEF5350),
                         modifier = Modifier.padding(top = 4.dp)
                     )
                 } else {
                     Text(
-                        "切换后会释放已加载的模型，下次使用时按新模式重新初始化。",
+                        S("switch_reload_hint"),
                         fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
                         modifier = Modifier.padding(top = 4.dp)
@@ -2797,15 +2880,15 @@ class MainActivity : ComponentActivity() {
             }
 
             // 8) 悬浮窗
-            if (category == SettingsScreen.Advanced) CollapsibleSection("悬浮窗模式", Icons.Default.Layers) {
+            if (category == SettingsScreen.Advanced) CollapsibleSection(S("floating_mode"), Icons.Default.Layers) {
                 Text(
-                    "启动悬浮窗后可切换到其他应用，继续后台翻译",
+                    S("floating_desc"),
                     fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                 )
                 Spacer(Modifier.height(8.dp))
                 if (FloatingTranslateService.isRunning) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("悬浮窗运行中", fontSize = 13.sp, color = Color(0xFF4CAF50))
+                        Text(S("floating_running"), fontSize = 13.sp, color = Color(0xFF4CAF50))
                         Spacer(Modifier.weight(1f))
                         TextButton({ stopService(Intent(this@MainActivity, FloatingTranslateService::class.java)) }) { Text(S("stop_capture")) }
                     }
@@ -2814,7 +2897,7 @@ class MainActivity : ComponentActivity() {
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)) {
                         Icon(Icons.Default.Layers, null, Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("启动悬浮窗", fontSize = 13.sp)
+                        Text(S("launch_floating"), fontSize = 13.sp)
                     }
                 }
             }
@@ -2831,12 +2914,12 @@ class MainActivity : ComponentActivity() {
 
             // 11) 日志
             @Suppress("DEPRECATION")
-            if (category == SettingsScreen.Advanced) CollapsibleSection("系统日志", Icons.Default.List) {
+            if (category == SettingsScreen.Advanced) CollapsibleSection(S("system_log"), Icons.Default.List) {
                 Column(
                     Modifier.fillMaxWidth().heightIn(max = 200.dp)
                         .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).padding(8.dp)
                 ) {
-                    if (_logs.isEmpty()) Text("暂无日志", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
+                    if (_logs.isEmpty()) Text(S("no_log"), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f))
                     else _logs.take(30).forEach { Text(it, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)) }
                 }
             }
@@ -3037,7 +3120,7 @@ class MainActivity : ComponentActivity() {
             OutlinedTextField(value, on, label = { Text(label, fontSize = 12.sp) },
                 visualTransformation = PasswordVisualTransformation(), singleLine = true,
                 modifier = Modifier.fillMaxWidth(), textStyle = LocalTextStyle.current.copy(fontSize = 13.sp))
-            Text(if (value.isBlank()) "请输入 API Key" else "已设置", fontSize = 11.sp,
+            Text(if (value.isBlank()) S("enter_api_key") else S("already_set"), fontSize = 11.sp,
                 color = if (value.isBlank()) Color(0xFFEF5350) else Color(0xFF4CAF50),
                 modifier = Modifier.padding(start = 4.dp, top = 2.dp))
         }
@@ -3048,7 +3131,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ApiKeyManagerPanel() {
         Column {
-            Text("当前已配置的 API 密钥", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text(S("configured_keys"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
             Spacer(Modifier.height(8.dp))
 
@@ -3058,6 +3141,9 @@ class MainActivity : ComponentActivity() {
                 KeyEntry("OpenAI", "openai_key", _openaiKey) { _openaiKey = it; saveKey("openai_key", it); invalidateTranslationCache() },
                 KeyEntry("Groq", "groq_key", _groqKey) { _groqKey = it; saveKey("groq_key", it); invalidateTranslationCache() },
                 KeyEntry("DeepL", "deepl_key", _deeplKey) { _deeplKey = it; saveKey("deepl_key", it); invalidateTranslationCache() },
+                KeyEntry("Claude", "claude_key", _claudeKey) { _claudeKey = it; saveKey("claude_key", it); invalidateTranslationCache() },
+                KeyEntry("火山引擎 App ID", "volcano_app_id", _volcanoAppId) { _volcanoAppId = it; saveKey("volcano_app_id", it) },
+                KeyEntry("火山引擎 Token", "volcano_access_token", _volcanoToken) { _volcanoToken = it; saveKey("volcano_access_token", it) },
             )
 
             keys.forEach { entry ->
@@ -3076,7 +3162,7 @@ class MainActivity : ComponentActivity() {
                                 val masked = entry.value.take(4) + "****" + entry.value.takeLast(4)
                                 Text(masked, fontSize = 11.sp, color = Color(0xFF4CAF50))
                             } else {
-                                Text("未设置", fontSize = 11.sp, color = Color(0xFFEF5350))
+                                Text(S("not_set"), fontSize = 11.sp, color = Color(0xFFEF5350))
                             }
                         }
                         if (entry.value.isNotBlank()) {
@@ -3093,7 +3179,7 @@ class MainActivity : ComponentActivity() {
 
             // Server configs
             Spacer(Modifier.height(10.dp))
-            Text("服务器配置", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text(S("server_config"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
             Spacer(Modifier.height(4.dp))
             Surface(
@@ -3102,9 +3188,23 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
             ) {
                 Column(Modifier.padding(10.dp)) {
-                    Text("本地翻译服务器", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Text(_localServerUrl, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                    Text("模型: $_localServerModel", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                    Text(S("local_trans_server"), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(
+                        _localServerUrl,
+                        { _localServerUrl = it; saveKey("local_server_url", it); invalidateTranslationCache() },
+                        label = { Text("URL", fontSize = 11.sp) }, singleLine = true,
+                        placeholder = { Text("http://192.168.1.100:11434/v1") },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                    )
+                    OutlinedTextField(
+                        _localServerModel,
+                        { _localServerModel = it; saveKey("local_server_model", it); invalidateTranslationCache() },
+                        label = { Text(S("model_label"), fontSize = 11.sp) }, singleLine = true,
+                        placeholder = { Text("qwen2.5:7b") },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                    )
                 }
             }
             Surface(
@@ -3113,34 +3213,66 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
             ) {
                 Column(Modifier.padding(10.dp)) {
-                    Text("AI 润色服务器", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    Text(_refineServerUrl, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
-                    Text("模型: $_refineModel", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                    Text(S("refine_server_label"), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(
+                        _refineServerUrl,
+                        { _refineServerUrl = it; saveKey("refine_server_url", it); invalidateTranslationCache() },
+                        label = { Text("URL", fontSize = 11.sp) }, singleLine = true,
+                        placeholder = { Text("http://192.168.1.100:11434/v1") },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                    )
+                    OutlinedTextField(
+                        _refineModel,
+                        { _refineModel = it; saveKey("refine_model", it); invalidateTranslationCache() },
+                        label = { Text(S("model_label"), fontSize = 11.sp) }, singleLine = true,
+                        placeholder = { Text("llama-3.3-70b-versatile") },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                    )
+                }
+            }
+            // Volcano cluster
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
+            ) {
+                Column(Modifier.padding(10.dp)) {
+                    Text(S("volcano_cluster_label"), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(
+                        _volcanoCluster,
+                        { _volcanoCluster = it.ifBlank { com.example.myapplication1.tts.VolcanoTts.DEFAULT_CLUSTER }; saveKey("volcano_cluster", _volcanoCluster) },
+                        label = { Text("Cluster", fontSize = 11.sp) }, singleLine = true,
+                        placeholder = { Text("volcano_tts") },
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                    )
                 }
             }
 
             // Add new key section
             Spacer(Modifier.height(12.dp))
-            Text("添加/修改 API 密钥", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text(S("add_modify_key"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
             Spacer(Modifier.height(4.dp))
 
             var selectedKeyType by remember { mutableStateOf(0) }
-            val keyTypes = listOf("OpenAI", "Groq", "DeepL")
-            Row(Modifier.fillMaxWidth()) {
+            val keyTypes = listOf("OpenAI", "Groq", "DeepL", "Claude", "火山 App ID", "火山 Token")
+            @OptIn(ExperimentalLayoutApi::class)
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 keyTypes.forEachIndexed { i, label ->
                     FilterChip(
                         selected = selectedKeyType == i,
                         onClick = { selectedKeyType = i },
-                        label = { Text(label, fontSize = 11.sp) },
-                        modifier = Modifier.padding(end = 6.dp)
+                        label = { Text(label, fontSize = 10.sp) },
                     )
                 }
             }
             Spacer(Modifier.height(4.dp))
             OutlinedTextField(
                 _newKeyValue, { _newKeyValue = it },
-                label = { Text("${keyTypes[selectedKeyType]} API Key", fontSize = 12.sp) },
+                label = { Text("${keyTypes[selectedKeyType]} Key", fontSize = 12.sp) },
                 visualTransformation = PasswordVisualTransformation(),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
@@ -3154,9 +3286,12 @@ class MainActivity : ComponentActivity() {
                             0 -> { _openaiKey = _newKeyValue; saveKey("openai_key", _newKeyValue) }
                             1 -> { _groqKey = _newKeyValue; saveKey("groq_key", _newKeyValue) }
                             2 -> { _deeplKey = _newKeyValue; saveKey("deepl_key", _newKeyValue) }
+                            3 -> { _claudeKey = _newKeyValue; saveKey("claude_key", _newKeyValue) }
+                            4 -> { _volcanoAppId = _newKeyValue; saveKey("volcano_app_id", _newKeyValue) }
+                            5 -> { _volcanoToken = _newKeyValue; saveKey("volcano_access_token", _newKeyValue) }
                         }
                         invalidateTranslationCache()
-                        log("已保存 ${keyTypes[selectedKeyType]} API Key")
+                        log("已保存 ${keyTypes[selectedKeyType]}")
                         _newKeyValue = ""
                     }
                 },
@@ -3175,7 +3310,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun ApiTestPanel() {
         Column {
-            Text("测试各 API 的连通性，逐步检查 DNS → 连接 → 认证 → 功能",
+            Text(S("api_test_desc"),
                 fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f))
             Spacer(Modifier.height(8.dp))
 
@@ -3191,7 +3326,7 @@ class MainActivity : ComponentActivity() {
                         Icon(Icons.Default.PlayArrow, null, Modifier.size(16.dp))
                     }
                     Spacer(Modifier.width(6.dp))
-                    Text(if (_apiTestRunning) "测试中..." else "测试所有 API", fontSize = 13.sp)
+                    Text(if (_apiTestRunning) S("testing_progress") else S("test_all"), fontSize = 13.sp)
                 }
                 if (_apiTestProgress.isNotBlank()) {
                     Spacer(Modifier.width(10.dp))
@@ -3201,7 +3336,7 @@ class MainActivity : ComponentActivity() {
 
             // Individual test buttons
             Spacer(Modifier.height(8.dp))
-            Text("单独测试", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text(S("individual_test"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
             Spacer(Modifier.height(4.dp))
 
@@ -3221,34 +3356,40 @@ class MainActivity : ComponentActivity() {
                         Text(label, fontSize = 12.sp)
                     }
                     if (!available) {
-                        Text("(未配置)", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f))
+                        Text(S("not_configured"), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f))
                     }
                 }
             }
 
-            SingleTestButton("OpenAI 翻译/ASR/TTS", _openaiKey.isNotBlank()) {
+            SingleTestButton(S("test_openai"), _openaiKey.isNotBlank()) {
                 runSingleApiTest("openai")
             }
-            SingleTestButton("Groq 翻译/ASR", _groqKey.isNotBlank()) {
+            SingleTestButton(S("test_groq"), _groqKey.isNotBlank()) {
                 runSingleApiTest("groq")
             }
-            SingleTestButton("DeepL 翻译", _deeplKey.isNotBlank()) {
+            SingleTestButton(S("test_deepl"), _deeplKey.isNotBlank()) {
                 runSingleApiTest("deepl")
+            }
+            SingleTestButton(S("test_claude"), _claudeKey.isNotBlank()) {
+                runSingleApiTest("claude")
             }
             SingleTestButton("Edge TTS", true) {
                 runSingleApiTest("edge")
             }
-            SingleTestButton("Google 翻译 TTS", true) {
+            SingleTestButton(S("test_google_tts"), true) {
                 runSingleApiTest("google_tts")
             }
-            SingleTestButton("本地服务器", _localServerUrl.isNotBlank()) {
+            SingleTestButton(S("test_volcano"), _volcanoAppId.isNotBlank() && _volcanoToken.isNotBlank()) {
+                runSingleApiTest("volcano")
+            }
+            SingleTestButton(S("test_local"), _localServerUrl.isNotBlank()) {
                 runSingleApiTest("local")
             }
 
             // Results
             if (_apiTestResults.isNotEmpty()) {
                 Spacer(Modifier.height(12.dp))
-                Text("测试结果", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(S("test_results"), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(6.dp))
 
                 _apiTestResults.forEach { result ->
@@ -3327,7 +3468,7 @@ class MainActivity : ComponentActivity() {
                         Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Warning, null, Modifier.size(14.dp), tint = Color(0xFFD32F2F))
                             Spacer(Modifier.width(6.dp))
-                            Text("阻断于: ${failed.step} — ${failed.detail}",
+                            Text("${S("blocked_at")}: ${failed.step} — ${failed.detail}",
                                 fontSize = 11.sp, color = Color(0xFFD32F2F))
                         }
                     }
@@ -3361,6 +3502,12 @@ class MainActivity : ComponentActivity() {
             }
             if (_deeplKey.isNotBlank()) {
                 tests.add { apiTestManager.testDeepL(_deeplKey) }
+            }
+            if (_claudeKey.isNotBlank()) {
+                tests.add { apiTestManager.testClaudeTranslation(_claudeKey) }
+            }
+            if (_volcanoAppId.isNotBlank() && _volcanoToken.isNotBlank()) {
+                tests.add { apiTestManager.testVolcanoTts(_volcanoAppId, _volcanoToken, _volcanoCluster) }
             }
             if (_localServerUrl.isNotBlank()) {
                 tests.add { apiTestManager.testLocalServer(_localServerUrl, _localServerModel) }
@@ -3416,8 +3563,10 @@ class MainActivity : ComponentActivity() {
                         results.add(apiTestManager.testGroqWhisper(_groqKey))
                     }
                     "deepl" -> results.add(apiTestManager.testDeepL(_deeplKey))
+                    "claude" -> results.add(apiTestManager.testClaudeTranslation(_claudeKey))
                     "edge" -> results.add(apiTestManager.testEdgeTts())
                     "google_tts" -> results.add(apiTestManager.testGoogleTts())
+                    "volcano" -> results.add(apiTestManager.testVolcanoTts(_volcanoAppId, _volcanoToken, _volcanoCluster))
                     "local" -> results.add(apiTestManager.testLocalServer(_localServerUrl, _localServerModel))
                 }
                 // Replace results for this type, keep others
@@ -3470,7 +3619,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun WhisperModelSelector() {
         Column(Modifier.padding(start = 4.dp, top = 6.dp)) {
-            Text("模型选择", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text(S("model_select"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
             Spacer(Modifier.height(4.dp))
 
@@ -3527,7 +3676,7 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun StreamingAsrModelPanel() {
         Column(Modifier.padding(start = 4.dp, top = 6.dp)) {
-            Text("模型选择", fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            Text(S("model_select"), fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
             Spacer(Modifier.height(4.dp))
 
@@ -3664,6 +3813,80 @@ class MainActivity : ComponentActivity() {
             Text(S("offline_tts_desc"), fontSize = 9.sp,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f),
                 modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+
+    @Composable
+    private fun VolcanoTtsPanel() {
+        Column(Modifier.padding(start = 12.dp, top = 6.dp)) {
+            Text(
+                S("volcano_panel_title"),
+                fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+            )
+            Text(
+                S("volcano_panel_desc"),
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f),
+                modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
+            )
+
+            OutlinedTextField(
+                value = _volcanoAppId,
+                onValueChange = {
+                    _volcanoAppId = it.trim()
+                    saveKey("volcano_app_id", _volcanoAppId)
+                },
+                label = { Text("App ID", fontSize = 11.sp) },
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+            )
+            OutlinedTextField(
+                value = _volcanoToken,
+                onValueChange = {
+                    _volcanoToken = it.trim()
+                    saveKey("volcano_access_token", _volcanoToken)
+                },
+                label = { Text("Access Token", fontSize = 11.sp) },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+            )
+            OutlinedTextField(
+                value = _volcanoCluster,
+                onValueChange = {
+                    _volcanoCluster = it.trim().ifBlank { com.example.myapplication1.tts.VolcanoTts.DEFAULT_CLUSTER }
+                    saveKey("volcano_cluster", _volcanoCluster)
+                },
+                label = { Text("Cluster (默认 volcano_tts)", fontSize = 11.sp) },
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp),
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+            )
+
+            Spacer(Modifier.height(6.dp))
+            val voices = com.example.myapplication1.tts.VolcanoTts.voicesForLang(_targetLang)
+            Text(
+                "语音角色 (${_targetLang.uppercase()})",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+            voices.forEachIndexed { i, (_, label) ->
+                SmallRadio(label, _volcanoVoiceIdx == i) {
+                    _volcanoVoiceIdx = i
+                    saveInt("volcano_voice_idx", i)
+                    log("火山语音: $label")
+                }
+            }
+            if (_volcanoAppId.isBlank() || _volcanoToken.isBlank()) {
+                Text(
+                    S("volcano_need_creds"),
+                    fontSize = 11.sp, color = Color(0xFFEF5350),
+                    modifier = Modifier.padding(start = 4.dp, top = 4.dp)
+                )
+            }
         }
     }
 

@@ -267,6 +267,142 @@ class ApiTestManager {
         ApiTestResult(name, steps, steps.all { it.success })
     }
 
+    // ===================== Claude (Anthropic Messages API) =====================
+
+    suspend fun testClaudeTranslation(apiKey: String): ApiTestResult = withContext(Dispatchers.IO) {
+        val steps = mutableListOf<StepResult>()
+        val name = "Claude 翻译"
+
+        // Step 1: DNS
+        val dns = testDns("api.anthropic.com")
+        steps.add(dns)
+        if (!dns.success) return@withContext ApiTestResult(name, steps, false)
+
+        // Step 2: Connection
+        val conn = testConnection("https://api.anthropic.com/v1/messages")
+        steps.add(conn)
+        if (!conn.success) return@withContext ApiTestResult(name, steps, false)
+
+        // Step 3+4: Auth + Functional (Claude doesn't have a /models endpoint, test with a real call)
+        val func = testClaudeMessages(apiKey)
+        steps.addAll(func)
+
+        ApiTestResult(name, steps, steps.all { it.success })
+    }
+
+    private fun testClaudeMessages(apiKey: String): List<StepResult> {
+        if (apiKey.isBlank()) return listOf(StepResult("认证", false, "API Key 为空", 0))
+        val t = System.currentTimeMillis()
+        return try {
+            val json = JSONObject().apply {
+                put("model", "claude-haiku-4-5-20251001")
+                put("max_tokens", 50)
+                put("messages", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", "Translate to Chinese in one word: Hello")
+                    })
+                })
+            }
+            val request = Request.Builder()
+                .url("https://api.anthropic.com/v1/messages")
+                .addHeader("x-api-key", apiKey)
+                .addHeader("anthropic-version", "2023-06-01")
+                .post(json.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            val resp = testClient.newCall(request).execute()
+            val body = resp.body?.string()
+            val d = System.currentTimeMillis() - t
+            if (resp.isSuccessful && body != null) {
+                val reply = JSONObject(body).getJSONArray("content")
+                    .getJSONObject(0).getString("text").trim()
+                listOf(
+                    StepResult("认证", true, "API Key 有效", d),
+                    StepResult("功能", true, "\"Hello\" → \"${reply.take(50)}\"", d)
+                )
+            } else if (resp.code == 401) {
+                listOf(StepResult("认证", false, "API Key 无效 (401)", d))
+            } else {
+                val errMsg = body?.let {
+                    try { JSONObject(it).optJSONObject("error")?.optString("message") } catch (_: Throwable) { null }
+                } ?: "HTTP ${resp.code}"
+                listOf(
+                    StepResult("认证", true, "Key 已发送", d),
+                    StepResult("功能", false, errMsg, d)
+                )
+            }
+        } catch (e: Throwable) {
+            listOf(StepResult("认证", false, "请求失败: ${e.message}", System.currentTimeMillis() - t))
+        }
+    }
+
+    // ===================== Volcano Engine TTS =====================
+
+    suspend fun testVolcanoTts(appId: String, token: String, cluster: String): ApiTestResult = withContext(Dispatchers.IO) {
+        val steps = mutableListOf<StepResult>()
+        val name = "火山引擎 TTS"
+
+        // Step 1: DNS
+        val dns = testDns("openspeech.bytedance.com")
+        steps.add(dns)
+        if (!dns.success) return@withContext ApiTestResult(name, steps, false)
+
+        // Step 2: Connection
+        val conn = testConnection("https://openspeech.bytedance.com/api/v1/tts")
+        steps.add(conn)
+        if (!conn.success) return@withContext ApiTestResult(name, steps, false)
+
+        // Step 3+4: Auth + Functional
+        if (appId.isBlank() || token.isBlank()) {
+            steps.add(StepResult("认证", false, "App ID 或 Token 为空", 0))
+            return@withContext ApiTestResult(name, steps, false)
+        }
+
+        val t = System.currentTimeMillis()
+        try {
+            val json = JSONObject().apply {
+                put("app", JSONObject().apply {
+                    put("appid", appId); put("token", token)
+                    put("cluster", cluster.ifBlank { "volcano_tts" })
+                })
+                put("user", JSONObject().apply { put("uid", "test_${System.currentTimeMillis()}") })
+                put("audio", JSONObject().apply {
+                    put("voice_type", "BV700_streaming"); put("encoding", "mp3")
+                    put("speed_ratio", 1.0); put("volume_ratio", 1.0); put("pitch_ratio", 1.0)
+                })
+                put("request", JSONObject().apply {
+                    put("reqid", java.util.UUID.randomUUID().toString())
+                    put("text", "你好"); put("text_type", "plain"); put("operation", "query")
+                })
+            }
+            val request = Request.Builder()
+                .url("https://openspeech.bytedance.com/api/v1/tts")
+                .addHeader("Authorization", "Bearer;$token")
+                .post(json.toString().toRequestBody("application/json".toMediaType()))
+                .build()
+            val resp = testClient.newCall(request).execute()
+            val body = resp.body?.string()
+            val d = System.currentTimeMillis() - t
+            if (resp.isSuccessful && body != null) {
+                val code = JSONObject(body).optInt("code", -1)
+                if (code == 3000) {
+                    val audioLen = JSONObject(body).optString("data", "").length
+                    steps.add(StepResult("认证", true, "凭据有效", d))
+                    steps.add(StepResult("功能", true, "合成成功 (Base64 ${audioLen / 1024}KB)", d))
+                } else {
+                    val msg = JSONObject(body).optString("message", "unknown")
+                    steps.add(StepResult("认证", false, "code=$code: $msg", d))
+                }
+            } else {
+                steps.add(StepResult("认证", false, "HTTP ${resp.code}", d))
+            }
+        } catch (e: Throwable) {
+            steps.add(StepResult("认证", false, "请求失败: ${e.message}", System.currentTimeMillis() - t))
+        }
+
+        ApiTestResult(name, steps, steps.all { it.success })
+    }
+
     // ===================== Local Server =====================
 
     suspend fun testLocalServer(serverUrl: String, model: String): ApiTestResult = withContext(Dispatchers.IO) {

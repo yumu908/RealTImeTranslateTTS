@@ -4,56 +4,53 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Left speech bubble (English source) -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M32,36 C32,33.2 34.2,31 37,31 L52,31 C54.8,31 57,33.2 57,36 L57,48 C57,50.8 54.8,53 52,53 L42,53 L36,58 L36,53 L37,53 C34.2,53 32,50.8 32,48 Z" />
+    <!--
+        Foreground from icon_01_soundwave.svg.
+        SVG viewBox=200x200 → scale 0.36 + translate(18,18) to center in 108x108 safe zone.
+        All coordinates below are in the original SVG space; the <group> applies the transform.
+    -->
+    <group
+        android:translateX="18"
+        android:translateY="18"
+        android:scaleX="0.36"
+        android:scaleY="0.36"
+        android:pivotX="0"
+        android:pivotY="0">
 
-    <!-- "A" text in left bubble -->
-    <path
-        android:fillColor="#3949AB"
-        android:pathData="M41.5,37 L38,48 L40.2,48 L40.8,46 L46.2,46 L46.8,48 L49,48 L45.5,37 Z M41.5,44.2 L43.5,38.5 L45.5,44.2 Z" />
+        <!-- 7 soundwave bars (white, rounded pill shapes) -->
+        <!-- Bar 1: x=41 y=90 w=10 h=20 rx=4 -->
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M45,90 L47,90 A4,4,0,0,1,51,94 L51,106 A4,4,0,0,1,47,110 L45,110 A4,4,0,0,1,41,106 L41,94 A4,4,0,0,1,45,90 Z"/>
+        <!-- Bar 2: x=59 y=75 w=10 h=50 rx=4 -->
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M63,75 L65,75 A4,4,0,0,1,69,79 L69,121 A4,4,0,0,1,65,125 L63,125 A4,4,0,0,1,59,121 L59,79 A4,4,0,0,1,63,75 Z"/>
+        <!-- Bar 3: x=77 y=55 w=10 h=90 rx=4 -->
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M81,55 L83,55 A4,4,0,0,1,87,59 L87,141 A4,4,0,0,1,83,145 L81,145 A4,4,0,0,1,77,141 L77,59 A4,4,0,0,1,81,55 Z"/>
+        <!-- Bar 4 (tallest): x=95 y=35 w=10 h=130 rx=4 -->
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M99,35 L101,35 A4,4,0,0,1,105,39 L105,161 A4,4,0,0,1,101,165 L99,165 A4,4,0,0,1,95,161 L95,39 A4,4,0,0,1,99,35 Z"/>
+        <!-- Bar 5: x=113 y=55 w=10 h=90 rx=4 -->
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M117,55 L119,55 A4,4,0,0,1,123,59 L123,141 A4,4,0,0,1,119,145 L117,145 A4,4,0,0,1,113,141 L113,59 A4,4,0,0,1,117,55 Z"/>
+        <!-- Bar 6: x=131 y=75 w=10 h=50 rx=4 -->
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M135,75 L137,75 A4,4,0,0,1,141,79 L141,121 A4,4,0,0,1,137,125 L135,125 A4,4,0,0,1,131,121 L131,79 A4,4,0,0,1,135,75 Z"/>
+        <!-- Bar 7: x=149 y=90 w=10 h=20 rx=4 -->
+        <path android:fillColor="#FFFFFF"
+            android:pathData="M153,90 L155,90 A4,4,0,0,1,159,94 L159,106 A4,4,0,0,1,155,110 L153,110 A4,4,0,0,1,149,106 L149,94 A4,4,0,0,1,153,90 Z"/>
 
-    <!-- Right speech bubble (Chinese target) -->
-    <path
-        android:fillColor="#E8EAF6"
-        android:pathData="M51,49 C51,46.2 53.2,44 56,44 L71,44 C73.8,44 76,46.2 76,49 L76,61 C76,63.8 73.8,66 71,66 L72,66 L72,71 L66,66 L56,66 C53.2,66 51,63.8 51,61 Z" />
-
-    <!-- Chinese character simplification in right bubble -->
-    <path
-        android:fillColor="#3949AB"
-        android:strokeWidth="1.8"
-        android:strokeColor="#3949AB"
-        android:fillType="nonZero"
-        android:pathData="M58,51 L70,51 M64,48 L64,58 M59,55 L69,55 M60,58.5 L64,62 L68,58.5" />
-
-    <!-- Arrow between bubbles -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:fillAlpha="0.85"
-        android:pathData="M48,44 L53,48 L48,52 Z" />
-
-    <!-- Sound wave arcs (left side) -->
-    <path
-        android:fillColor="#00000000"
-        android:strokeWidth="1.6"
-        android:strokeColor="#FFFFFF"
-        android:strokeAlpha="0.7"
-        android:pathData="M27,40 Q24,44 27,48" />
-    <path
-        android:fillColor="#00000000"
-        android:strokeWidth="1.6"
-        android:strokeColor="#FFFFFF"
-        android:strokeAlpha="0.45"
-        android:pathData="M24,37 Q19,44 24,51" />
-
-    <!-- AI sparkle (top right) -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:fillAlpha="0.9"
-        android:pathData="M76,33 L77.5,36 L80.5,37.5 L77.5,39 L76,42 L74.5,39 L71.5,37.5 L74.5,36 Z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:fillAlpha="0.6"
-        android:pathData="M80,28 L80.8,30 L82.8,30.8 L80.8,31.6 L80,33.6 L79.2,31.6 L77.2,30.8 L79.2,30 Z" />
+        <!-- Gold dot (left) -->
+        <path android:fillColor="#fbbf24"
+            android:pathData="M50,175 m-5,0 a5,5,0,1,1,10,0 a5,5,0,1,1,-10,0"/>
+        <!-- Cyan dot (right) -->
+        <path android:fillColor="#22d3ee"
+            android:pathData="M150,175 m-5,0 a5,5,0,1,1,10,0 a5,5,0,1,1,-10,0"/>
+        <!-- Dashed line between dots (solid approximation — Android doesn't support stroke-dasharray in VectorDrawable) -->
+        <path android:fillColor="#00000000"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="2"
+            android:strokeAlpha="0.45"
+            android:pathData="M58,175 L142,175"/>
+    </group>
 </vector>

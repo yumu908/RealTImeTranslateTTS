@@ -5,7 +5,7 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Gradient background: deep indigo to teal -->
+    <!-- Gradient background matching icon_01_soundwave.svg: deep indigo → indigo -->
     <path android:pathData="M0,0h108v108h-108z">
         <aapt:attr name="android:fillColor">
             <gradient
@@ -14,9 +14,8 @@
                 android:startY="0"
                 android:endX="108"
                 android:endY="108">
-                <item android:offset="0.0" android:color="#FF3949AB" />
-                <item android:offset="0.5" android:color="#FF5C6BC0" />
-                <item android:offset="1.0" android:color="#FF00897B" />
+                <item android:offset="0.0" android:color="#FF1e1b4b" />
+                <item android:offset="1.0" android:color="#FF4338ca" />
             </gradient>
         </aapt:attr>
     </path>

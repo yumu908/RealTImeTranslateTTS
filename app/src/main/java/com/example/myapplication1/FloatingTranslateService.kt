@@ -81,6 +81,8 @@ class FloatingTranslateService : Service() {
     private var systemTts: TextToSpeech? = null
     private var edgeTts: EdgeTts? = null
     private val googleTts = GoogleTranslateTts()
+    private var volcanoTts: com.example.myapplication1.tts.VolcanoTts? = null
+    private var volcanoVoiceIdx = 0
     private var ttsEngine = 0
     private var edgeVoiceIdx = 0
     private var autoSpeak = true
@@ -184,7 +186,7 @@ class FloatingTranslateService : Service() {
         try { recognizer?.close() } catch (_: Throwable) {}
         try { voskModel?.close() } catch (_: Throwable) {}
         try { systemTts?.stop(); systemTts?.shutdown() } catch (_: Throwable) {}
-        edgeTts?.close(); googleTts.close()
+        edgeTts?.close(); googleTts.close(); volcanoTts?.close()
         translationEngine?.close()
         floatingQualityEngine?.close()
         translationHistory?.close()
@@ -197,7 +199,16 @@ class FloatingTranslateService : Service() {
         val p = getSharedPreferences("vri_settings", Context.MODE_PRIVATE)
         ttsEngine = p.getInt("tts_engine", 0)
         edgeVoiceIdx = p.getInt("edge_voice_idx", 0)
+        volcanoVoiceIdx = p.getInt("volcano_voice_idx", 0)
         autoSpeak = p.getBoolean("auto_speak", true)
+        // Build Volcano TTS lazily only if credentials are present
+        val vAppId = p.getString("volcano_app_id", "") ?: ""
+        val vToken = p.getString("volcano_access_token", "") ?: ""
+        val vCluster = p.getString("volcano_cluster", com.example.myapplication1.tts.VolcanoTts.DEFAULT_CLUSTER)
+            ?: com.example.myapplication1.tts.VolcanoTts.DEFAULT_CLUSTER
+        if (vAppId.isNotBlank() && vToken.isNotBlank()) {
+            volcanoTts = com.example.myapplication1.tts.VolcanoTts(vAppId, vToken, vCluster, cacheDir)
+        }
         translationEngineType = p.getInt("translation_engine", 0)
         translationEngine = when (translationEngineType) {
             1 -> LLMTranslation(p.getString("openai_key", "") ?: "")
@@ -215,6 +226,10 @@ class FloatingTranslateService : Service() {
                 val engine = OnDeviceTranslation(this, OnDeviceTranslationModel.NLLB_600M_INT8)
                 engine.also { if (OnDeviceTranslationModel.NLLB_600M_INT8.isDownloaded(this)) it.init() }
             }
+            7 -> ClaudeTranslation(
+                p.getString("claude_key", "") ?: "",
+                p.getString("claude_trans_model", "claude-sonnet-4-20250514") ?: "claude-sonnet-4-20250514"
+            )
             else -> MlKitTranslation(mlkitTranslator)
         }
 
@@ -236,6 +251,10 @@ class FloatingTranslateService : Service() {
             }
             TranslationRefiner.PROVIDER_LOCAL -> {
                 if (refineServerUrl.isNotBlank()) TranslationRefiner("", refineServerUrl, refineModel) else null
+            }
+            TranslationRefiner.PROVIDER_CLAUDE -> {
+                val key = p.getString("claude_key", "") ?: ""
+                if (key.isNotBlank()) TranslationRefiner(key, TranslationRefiner.providerBaseUrl(TranslationRefiner.PROVIDER_CLAUDE), refineModel) else null
             }
             else -> null
         }
@@ -539,6 +558,18 @@ class FloatingTranslateService : Service() {
                 // OpenAI TTS — fall back to Edge if no key
                 val v = EdgeTts.ZH_VOICES.getOrNull(edgeVoiceIdx)?.first ?: "zh-CN-XiaoxiaoNeural"
                 try { edgeTts?.speak(text, voice = v, rate = dynamicEdgeRate()) } catch (_: Throwable) { speakSystem(text) }
+            }
+            5 -> {
+                // 火山引擎 TTS — 未配置或失败时回退 Edge
+                val vt = volcanoTts
+                if (vt == null) {
+                    val v = EdgeTts.ZH_VOICES.getOrNull(edgeVoiceIdx)?.first ?: "zh-CN-XiaoxiaoNeural"
+                    try { edgeTts?.speak(text, voice = v, rate = dynamicEdgeRate()) } catch (_: Throwable) { speakSystem(text) }
+                } else {
+                    val voices = com.example.myapplication1.tts.VolcanoTts.ZH_VOICES
+                    val vv = voices.getOrNull(volcanoVoiceIdx)?.first ?: voices.first().first
+                    try { vt.speak(text, voice = vv) } catch (_: Throwable) { speakSystem(text) }
+                }
             }
         }
     }
