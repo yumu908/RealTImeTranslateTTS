@@ -4,6 +4,21 @@
 
 一款 Android 实时语音翻译（同声传译）应用，支持麦克风录音与系统媒体音频的语音识别、翻译和语音合成（TTS）。
 
+## 应用截图
+
+<p align="center">
+  <img src="docs/screenshots/main_translation.png" width="200" alt="实时翻译主界面" />
+  <img src="docs/screenshots/settings_main.png" width="200" alt="设置页" />
+  <img src="docs/screenshots/settings_general.png" width="200" alt="通用设置" />
+  <img src="docs/screenshots/settings_asr.png" width="200" alt="语音识别引擎" />
+</p>
+<p align="center">
+  <img src="docs/screenshots/settings_tts.png" width="200" alt="语音合成引擎" />
+  <img src="docs/screenshots/settings_translation.png" width="200" alt="翻译引擎" />
+  <img src="docs/screenshots/settings_enhance.png" width="200" alt="翻译增强" />
+  <img src="docs/screenshots/settings_advanced.png" width="200" alt="高级设置" />
+</p>
+
 ---
 
 ## 最新更新 (2026-04)
