@@ -4,21 +4,6 @@
 
 An Android real-time speech translation app (simultaneous interpretation) supporting microphone and system media audio input with speech recognition, translation, and text-to-speech output.
 
-## Screenshots
-
-<p align="center">
-  <img src="docs/screenshots/main_translation.png" width="200" alt="Real-time Translation" />
-  <img src="docs/screenshots/settings_main.png" width="200" alt="Settings" />
-  <img src="docs/screenshots/settings_general.png" width="200" alt="General Settings" />
-  <img src="docs/screenshots/settings_asr.png" width="200" alt="ASR Engines" />
-</p>
-<p align="center">
-  <img src="docs/screenshots/settings_tts.png" width="200" alt="TTS Engines" />
-  <img src="docs/screenshots/settings_translation.png" width="200" alt="Translation Engines" />
-  <img src="docs/screenshots/settings_enhance.png" width="200" alt="Translation Enhancement" />
-  <img src="docs/screenshots/settings_advanced.png" width="200" alt="Advanced Settings" />
-</p>
-
 ---
 
 ## Latest Updates (2026-04)
@@ -120,6 +105,24 @@ When the app goes to background, a floating translation window continues recordi
 - Latency dashboard (ASR / Translation / Refinement / TTS per-stage timing)
 - Device metrics (CPU / memory / battery / temperature)
 - Audio device selection (input / output)
+
+## Screenshots
+
+### Main workflow
+
+| Real-time Translation | Settings Home |
+|---|---|
+| ![Real-time Translation](docs/screenshots/main_translation.png) | ![Settings](docs/screenshots/settings_main.png) |
+
+### Settings pages
+
+| General | ASR Engines | TTS Engines | Translation Engines |
+|---|---|---|---|
+| ![General Settings](docs/screenshots/settings_general.png) | ![ASR Engines](docs/screenshots/settings_asr.png) | ![TTS Engines](docs/screenshots/settings_tts.png) | ![Translation Engines](docs/screenshots/settings_translation.png) |
+
+| Translation Enhancement | Advanced |
+|---|---|
+| ![Translation Enhancement](docs/screenshots/settings_enhance.png) | ![Advanced Settings](docs/screenshots/settings_advanced.png) |
 
 ---
 
