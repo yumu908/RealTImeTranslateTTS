@@ -200,7 +200,9 @@ class MediaCaptureService : Service() {
                 .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                 .build()
 
-            val bufSize = sampleRate * 2 * 2 // 2 seconds buffer
+            // Use a smaller buffer (≈0.5 s) to reduce latency
+            // Use a larger buffer (≈1 s) to improve ASR stability
+            val bufSize = sampleRate / 2 // ~0.25‑second buffer (sampleRate * 2 / 4 bytes)
             val record = AudioRecord.Builder()
                 .setAudioPlaybackCaptureConfig(config)
                 .setAudioFormat(fmt)
@@ -256,7 +258,9 @@ class MediaCaptureService : Service() {
             val ratio = if (needsResample) captureSampleRate / 16000 else 1
 
             // Read buffer: must be multiple of ratio for clean resampling
-            val readSize = if (needsResample) 2048 * ratio else 2048
+            // Smaller read chunk for lower latency
+            // Smaller read chunk for lower latency
+            val readSize = if (needsResample) 512 * ratio else 512
             val readBuf = ShortArray(readSize)
 
             try {

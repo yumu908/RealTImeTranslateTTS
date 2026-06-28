@@ -14,6 +14,7 @@
 
   "ui_language": "Interface Language",
   "basic_settings": "Basic Settings",
+  "enable_translation": "Enable Translation",
   "auto_speak": "Auto-play translation",
   "paragraph_grouping": "Paragraph Grouping",
   "auto_group": "Auto-group paragraphs",
@@ -295,6 +296,7 @@
   "speaker_id": "Speaker",
   "speaker_id_label": "Speaker (Speaker ID: %d / %d)",
 
+  "volcano_engine_tts": "Volcano Engine TTS",
   "volcano_panel_title": "Volcano Engine TTS (ByteDance)",
   "volcano_panel_desc": "Create a Speech Synthesis app in Volcano Engine console to get App ID and Access Token.",
   "volcano_need_creds": "⚠ App ID and Access Token required",

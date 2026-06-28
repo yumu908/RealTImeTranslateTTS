@@ -14,6 +14,7 @@
 
   "ui_language": "界面语言",
   "basic_settings": "基本设置",
+  "enable_translation": "开启翻译",
   "auto_speak": "自动播报翻译",
   "paragraph_grouping": "段落聚合",
   "auto_group": "自动聚合段落",

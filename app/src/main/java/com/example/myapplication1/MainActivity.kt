@@ -139,6 +139,7 @@ class MainActivity : ComponentActivity() {
     // ---- 设置 ----
     private var _uiLang by mutableStateOf("zh")  // "zh" or "en"
     private var _autoSpeak by mutableStateOf(true)
+    private var _enableTranslation by mutableStateOf(true)
     // ASR: 0=系统, 1=Vosk, 2=OpenAI, 3=Groq, 4=本地Whisper
     private var _asrEngine by mutableStateOf(0)
     // TTS: 0=Edge, 1=系统, 2=Google, 3=OpenAI
@@ -430,6 +431,7 @@ class MainActivity : ComponentActivity() {
         GlossaryManager.init(this)
         // Initialize translation pipeline with ordered delivery
         translationPipeline = TranslationPipeline(lifecycleScope)
+        translationPipeline.enableTranslation = _enableTranslation
         translationPipeline.setCallback(pipelineCallback)
         translationPipeline.setEngine(getTranslationEngine())
         translationPipeline.setRefiner(buildRefiner())
@@ -648,6 +650,21 @@ class MainActivity : ComponentActivity() {
         _inputDevices.addAll(am.getDevices(AudioManager.GET_DEVICES_INPUTS))
         _outputDevices.clear()
         _outputDevices.addAll(am.getDevices(AudioManager.GET_DEVICES_OUTPUTS))
+        // Preserve system default microphone for ASR (do not auto-select media audio here)
+        // If a specific input device is required, the UI can let the user choose it.
+        // The previous auto‑selection logic has been removed to avoid quality degradation.
+        // if (_selectedInputId == 0 && _inputDevices.isNotEmpty()) {
+        //     // Try to find a device whose name indicates it is the media playback capture
+        //     val mediaDevice = _inputDevices.firstOrNull {
+        //         val name = it.productName?.toString() ?: ""
+        //         name.contains("媒体") || name.contains("Media")
+        //     }
+        //     // Fallback: choose the last input device that is not a built‑in microphone
+        //     val fallback = _inputDevices.filter { it.type != AudioDeviceInfo.TYPE_BUILTIN_MIC }.lastOrNull()
+        //     val chosen = mediaDevice ?: fallback ?: _inputDevices.last()
+        //     _selectedInputId = chosen.id
+        //     saveInt("selected_input_id", chosen.id)
+        // }
     }
 
     private fun deviceLabel(d: AudioDeviceInfo): String {
@@ -994,14 +1011,27 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun startVoskAsr() {
-        val sr = 16000; val bs = max(AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT), 4096)
-        try { audioRecord = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bs) }
-        catch (e: Throwable) { log("录音失败: ${e.message}"); return }
+        // 16 kHz 为模型固定采样率，使用更大的缓冲（32 KB）降低 CPU 轮询频率
+        val sr = 16000
+        val minBuf = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        val bs = max(minBuf, 32768) // 32 KB buffer
+        try {
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                sr,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bs
+            )
+        } catch (e: Throwable) {
+            log("录音失败: ${e.message}")
+            return
+        }
         if (voskModel == null) { log("Vosk模型未就绪"); return }
         recognizer?.close(); recognizer = Recognizer(voskModel, sr.toFloat())
         findInputDevice()?.let { audioRecord?.preferredDevice = it }
-        // 启用硬件回声消除
-        attachEchoCanceler(audioRecord!!)
+        // 对于已关闭的智能过滤和翻译，回声消除往往不是必需，直接跳过以降低 CPU 开销
+        // attachEchoCanceler(audioRecord!!)
         try { audioRecord?.startRecording() } catch (e: Throwable) { log("录音启动失败"); return }
         _recording = true; log("开始录音 (Vosk)")
         val localRec = recognizer ?: run { log("Vosk识别器未就绪"); return }
@@ -1011,19 +1041,18 @@ class MainActivity : ComponentActivity() {
             while (isActive && _recording) {
                 val n = try { localAudio.read(buf, 0, buf.size) } catch (_: Throwable) { break }
                 if (n <= 0) { if (n < 0) break else continue }
+                // 简单 RMS 检测，仅用于激活 mic 图标，不做额外计算
                 val rms = buf.take(n).fold(0.0) { a, s -> a + s * s } / n
-                if (10 * log10(rms + 1e-9) > -35.0) _micHeardVoice = true
+                if (10 * kotlin.math.log10(rms + 1e-9) > -35.0) _micHeardVoice = true
                 try {
                     if (localRec.acceptWaveForm(buf, n)) {
                         val t = JSONObject(localRec.result).optString("text").trim()
                         if (t.isNotBlank()) withContext(Dispatchers.Main) { onAsrResult(t) }
                     } else {
                         val p = JSONObject(localRec.partialResult).optString("partial").trim()
-                        if (p.isNotBlank()) withContext(Dispatchers.Main) {
-                            _currentPartial = p
-                        }
+                        if (p.isNotBlank()) withContext(Dispatchers.Main) { _currentPartial = p }
                     }
-                } catch (_: Throwable) {}
+                } catch (_: Throwable) { /* ignore */ }
             }
         }
     }
@@ -1302,6 +1331,7 @@ class MainActivity : ComponentActivity() {
         _ttsEngine = p.getInt("tts_engine", 0)
         _edgeVoiceIdx = p.getInt("edge_voice_idx", 0)
         _autoSpeak = p.getBoolean("auto_speak", true)
+        _enableTranslation = p.getBoolean("enable_translation", true)
         _selectedInputId = p.getInt("selected_input_id", 0)
         _selectedOutputId = p.getInt("selected_output_id", 0)
         _translationEngineType = p.getInt("translation_engine", 0)
@@ -1799,6 +1829,7 @@ class MainActivity : ComponentActivity() {
     private fun asrReady() = when (_asrEngine) { 0 -> _systemAsrAvailable; 1 -> _voskReady; 2, 5 -> _openaiKey.isNotBlank(); 3 -> _groqKey.isNotBlank(); 4 -> _localWhisperReady; 6 -> _streamingAsrReady; else -> false }
     private fun asrLabel(): String {
         val asr = when (_asrEngine) { 0 -> "系统识别"; 1 -> "Vosk"; 2 -> "OpenAI"; 3 -> "Groq"; 4 -> "Whisper ${selectedWhisperModel().label}"; 5 -> "GPT-4o"; 6 -> "流式 ${selectedStreamingModel().label}"; else -> "" }
+        if (!_enableTranslation) return "$asr → 仅识别"
         val trans = when (_translationEngineType) { 0 -> "MLKit"; 1 -> "GPT"; 2 -> "Groq"; 3 -> "DeepL"; 4 -> "本地LLM"; 5 -> "Opus-MT"; 6 -> "NLLB"; else -> "" }
         val refine = if (_refineProvider > 0) " +润色" else ""
         return "$asr → $trans$refine"
@@ -1899,7 +1930,7 @@ class MainActivity : ComponentActivity() {
                         ) {
                             CompactStatusDot(asrReady(), "ASR")
                             Spacer(Modifier.width(10.dp))
-                            CompactStatusDot(translationReady(), "翻译")
+                            CompactStatusDot(translationReady() && _enableTranslation, "翻译")
                             Spacer(Modifier.width(10.dp))
                             CompactStatusDot(_ttsReady && _ttsLangOk, "TTS")
                         }
@@ -1972,7 +2003,6 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     ConversationArea(Modifier.weight(1f))
-                    Spacer(Modifier.height(80.dp))
                 }
             }
         }
@@ -2155,6 +2185,11 @@ class MainActivity : ComponentActivity() {
         }
         // 1) 基本设置
         CollapsibleSection(S("basic_settings"), Icons.Default.Settings, defaultExpanded = true) {
+            SettingSwitch(S("enable_translation"), _enableTranslation) {
+                _enableTranslation = it
+                saveBool("enable_translation", it)
+                translationPipeline.enableTranslation = it
+            }
             SettingSwitch(S("auto_speak"), _autoSpeak) { _autoSpeak = it; saveBool("auto_speak", it) }
         }
         // 2) 段落聚合
@@ -4363,10 +4398,18 @@ class MainActivity : ComponentActivity() {
         val ls = rememberLazyListState()
         val paras = _paragraphs  // reading mutableStateOf triggers recomposition on any write
         val totalItems = paras.size + (if (_currentPartial.isNotBlank()) 1 else 0)
-        LaunchedEffect(totalItems, paras) {
-            if (totalItems > 0) ls.animateScrollToItem(totalItems - 1)
+        // Instantly scroll to the newest item whenever the list size changes
+        // Instantly scroll to the newest item whenever the list changes (including content updates)
+        LaunchedEffect(paras, _currentPartial) {
+            if (totalItems > 0) {
+                ls.scrollToItem(totalItems - 1)
+            }
         }
-        LazyColumn(state = ls, modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        LazyColumn(
+            state = ls,
+            modifier = modifier
+                .padding(horizontal = 16.dp)
+            .padding(bottom = 80.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
@@ -4397,44 +4440,46 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.weight(1f))
                 }
 
-                Spacer(Modifier.height(6.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
-                Spacer(Modifier.height(6.dp))
+                if (_enableTranslation) {
+                    Spacer(Modifier.height(6.dp))
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                    Spacer(Modifier.height(6.dp))
 
-                // Target text (translation) — always below source
-                val zh = para.rawZh
-                if (zh.isNotBlank()) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Text(_targetLang.uppercase(), fontSize = 9.sp, fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f),
-                            modifier = Modifier.padding(end = 6.dp))
-                        Text(zh, fontSize = 17.sp, fontWeight = FontWeight.Medium, lineHeight = 24.sp,
-                            modifier = Modifier.weight(1f))
-                        if (zh != "[翻译失败]" && zh != "[Translation failed]") {
-                            IconButton({ speakManual(zh) }, Modifier.size(32.dp)) {
-                                Icon(Icons.AutoMirrored.Filled.VolumeUp, S("play"),
-                                    Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                    // Target text (translation) — always below source
+                    val zh = para.rawZh
+                    if (zh.isNotBlank()) {
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(_targetLang.uppercase(), fontSize = 9.sp, fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.5f),
+                                modifier = Modifier.padding(end = 6.dp))
+                            Text(zh, fontSize = 17.sp, fontWeight = FontWeight.Medium, lineHeight = 24.sp,
+                                modifier = Modifier.weight(1f))
+                            if (zh != "[翻译失败]" && zh != "[Translation failed]") {
+                                IconButton({ speakManual(zh) }, Modifier.size(32.dp)) {
+                                    Icon(Icons.AutoMirrored.Filled.VolumeUp, S("play"),
+                                        Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                                }
                             }
                         }
+                    } else if (para.anyTranslating) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(S("translating"), fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                        }
                     }
-                } else if (para.anyTranslating) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                        Text(S("translating"), fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
-                    }
-                }
 
-                // Status: translation progress or quality upgrade indicator
-                val hasUpgrade = para.segments.any { it.qualityZh.isNotBlank() }
-                if (zh.isNotBlank() && para.anyTranslating) {
-                    Spacer(Modifier.height(4.dp))
-                    val done = para.segments.count { !it.translating }
-                    Text(S("translating"), fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
-                } else if (hasUpgrade) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(S("optimized"), fontSize = 10.sp, color = Color(0xFF4CAF50).copy(alpha = 0.7f))
+                    // Status: translation progress or quality upgrade indicator
+                    val hasUpgrade = para.segments.any { it.qualityZh.isNotBlank() }
+                    if (zh.isNotBlank() && para.anyTranslating) {
+                        Spacer(Modifier.height(4.dp))
+                        val done = para.segments.count { !it.translating }
+                        Text(S("translating"), fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
+                    } else if (hasUpgrade) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(S("optimized"), fontSize = 10.sp, color = Color(0xFF4CAF50).copy(alpha = 0.7f))
+                    }
                 }
             }
         }
@@ -4477,8 +4522,8 @@ class MainActivity : ComponentActivity() {
         )
         val p by rememberInfiniteTransition().animateFloat(1f, if (recording || isMediaCapture) 1.08f else 1f, infiniteRepeatable(tween(800), RepeatMode.Reverse))
         val label = when {
-            isMediaCapture -> "媒体捕获中"
-            recording -> "正在录音…点击停止"
+            isMediaCapture -> ""
+            recording -> ""
             else -> "点击开始录音"
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {

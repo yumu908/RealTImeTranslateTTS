@@ -83,8 +83,9 @@ class LLMTranslation(
         private const val TAG = "LLMTranslation"
 
         private val sharedClient = OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
             .build()
 
         /**
@@ -144,8 +145,8 @@ class LocalServerTranslation(
         private const val TAG = "LocalServerTranslation"
 
         private val localClient = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS)
             .build()
     }
 
@@ -189,8 +190,8 @@ class DeepLTranslation(private val apiKey: String) : TranslationEngine() {
 
     companion object {
         private val sharedClient = OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
             .build()
     }
 
@@ -284,8 +285,8 @@ class ClaudeTranslation(
         private const val ANTHROPIC_VERSION = "2023-06-01"
 
         private val sharedClient = OkHttpClient.Builder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
             .build()
 
         data class ModelPreset(val id: String, val label: String, val desc: String)

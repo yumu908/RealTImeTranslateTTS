@@ -78,6 +78,8 @@ class TranslationPipeline(private val scope: CoroutineScope) {
     // Context for background/glossary/latency mode
     @Volatile var translationContext: TranslationContext = TranslationContext()
 
+    @Volatile var enableTranslation: Boolean = true
+
     /** Timeout for quality path in BALANCED mode (ms). */
     private val qualityTimeoutMs = 8_000L
 
@@ -111,6 +113,14 @@ class TranslationPipeline(private val scope: CoroutineScope) {
      * On a cache miss the translation is dispatched to IO and results are delivered async.
      */
     fun submitSentence(seqId: Int, paragraphId: Int, en: String) {
+        if (!enableTranslation) {
+            scope.launch(Dispatchers.Main) {
+                callback?.onTranslationResult(seqId, en, "")
+                callback?.onLatencyMeasured(0L)
+            }
+            return
+        }
+
         // ---- Fast path: cache lookup on calling thread ----
         val key = normalizeCacheKey(en)
         val cached: String? = synchronized(translationCache) { translationCache[key] }
